@@ -36,7 +36,7 @@ int setup_tty(char *port_name) {
 
     if (serial_port < 0) {
         fprintf(stderr, "open error: %s\n", strerror(errno));
-        return serial_port;
+        return -1;
     }
 
     if (tcgetattr(serial_port, &tty) != 0) {
@@ -52,9 +52,7 @@ int setup_tty(char *port_name) {
     tty.c_cflag |= CREAD | CLOCAL; // Read, ignore ctrl lines
     
     tty.c_lflag &= ~ICANON; // Disable cannonical mode
-    tty.c_lflag &= ~ECHO;   // Disable echo (just in case)
-    tty.c_lflag &= ~ECHOE;
-    tty.c_lflag &= ~ECHONL;
+    tty.c_lflag &= ~(ECHO | ECHOE | ECHONL);   // Disable echo (just in case)
     tty.c_lflag &= ~ISIG;   // Disable signal chars interpretation
 
     tty.c_iflag &= ~(IXON | IXOFF | IXANY); // Disable software flow control
@@ -63,7 +61,7 @@ int setup_tty(char *port_name) {
 
     tty.c_oflag &= ~(OPOST | ONLCR);
 
-    tty.c_cc[VTIME] = 100; // wait up to 1s, returning as soon as data is rcvd
+    tty.c_cc[VTIME] = 255; // wait up to 1s, returning as soon as data is rcvd
     tty.c_cc[VMIN] = 0;
 
     cfsetspeed(&tty, BAUD_RATE);
@@ -79,51 +77,47 @@ int setup_tty(char *port_name) {
 void parse_message(int fd, char msg[MSG_SIZE]) {
     char *token;
 
-    token = strtok(msg, " ");
-    char *c = strchr(token, '\n');
+    token = strtok(msg, " \n");
 
-    if (c) {
-        *c = 0;
+    while (token) {
+        if (strncmp(token, "GET_TEMP", MSG_SIZE) == 0) {
+            char temp[7];
+            snprintf(temp, sizeof(temp), "%.1f\n", get_temp());
+
+            write(fd, temp, strlen(temp));
+        } else if (strncmp(token, "STATUS", MSG_SIZE) == 0) {
+            char status[4];
+            snprintf(status, sizeof(status), "%d\n", get_status());
+
+            write(fd, status, strlen(status));
+        } else if (strncmp(token, "RESET", MSG_SIZE) == 0) {
+            reset();
+        } else if (strncmp(token, "SET_LED", MSG_SIZE) == 0) {
+            int led;
+            char *led_code = strtok(NULL, "\n");
+
+            int items = sscanf(led_code, "%d", &led);
+
+            if (items == EOF && errno) {
+                fprintf(stderr, "sscanf error: %s\n", strerror(errno));
+                write(fd, "ERROR\n", 6);
+            }
+
+            if (items == EOF || led > 255) {
+                write(fd, "ERROR\n", 6);
+            } else {
+                set_led((uint8_t) led);
+                write(fd, "OK\n", 3);
+            }
+        } else if (strncmp(token, "EXIT", MSG_SIZE) == 0) {
+            run = 0; 
+            return;
+        } else {
+            write(fd, "ERROR\n", 6);
+        }
+        token = strtok(NULL, " \n");
     }
 
-    if (strncmp(token, "GET_TEMP", MSG_SIZE) == 0) {
-        char temp[6];
-        snprintf(temp, 6, "%.1f", get_temp());
-
-        write(fd, temp, 6);
-        return;
-    }
-
-    if (strncmp(token, "STATUS", MSG_SIZE) == 0) {
-        char status[2];
-        snprintf(status, 2, "%d", get_status());
-
-        write(fd, status, 2);
-        return;
-    }
-
-    if (strncmp(token, "RESET", MSG_SIZE) == 0) {
-        reset();
-        return;
-    }
-    
-    if (strncmp(token, "SET_LED", MSG_SIZE) == 0) {
-        int led;
-        char *led_code = strtok(NULL, " ");
-
-        // LOL
-        sscanf(led_code, "%d", &led);
-
-        set_led((uint8_t) led);
-        return;
-    }
-    
-    if (strncmp(token, "EXIT", MSG_SIZE) == 0) {
-        run = 0; 
-        return;
-    }
-
-    write(fd, "ERROR", 5);
 }
 
 int main(int argc, char **argv) {
@@ -145,14 +139,16 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if ((spfd = setup_tty(argv[1])) < 0 && argc > 2) {
-        fclose(stream);
+    if ((spfd = setup_tty(argv[1])) < 0) {
+        if (argc > 2) {
+            fclose(stream);
+        }
+
         return 1;
     }
 
-    memset(&read_buf, '\0', sizeof(read_buf));
-
     while(run) {
+        memset(&read_buf, '\0', sizeof(read_buf));
         if((num_bytes = read(spfd, &read_buf, sizeof(read_buf))) > 0) {
             parse_message(spfd, read_buf);
         } else {
